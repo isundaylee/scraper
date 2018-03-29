@@ -21,4 +21,14 @@ DOWNLOAD_WARNSIZE = 0
 ROBOTSTXT_OBEY = False
 USER_AGENT = "FirmwareBot/1.0 (+https://github.com/firmadyne/scraper)"
 
+DOWNLOADER_MIDDLEWARES = {
+    'scrapy.downloadermiddlewares.httpcache.HttpCacheMiddleware': 300,
+}
+
+HTTPCACHE_ENABLED = True
+HTTPCACHE_POLICY = 'scrapy.extensions.httpcache.DummyPolicy'
+HTTPCACHE_STORAGE = 'scrapy.extensions.httpcache.FilesystemCacheStorage'
+
+CLOSESPIDER_ERRORCOUNT = 1
+
 #SQL_SERVER = "127.0.0.1"

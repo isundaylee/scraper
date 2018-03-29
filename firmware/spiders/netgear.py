@@ -1,115 +1,70 @@
-from scrapy import Spider
+from scrapy import Spider, Request
 from scrapy.http import FormRequest
 
 from firmware.items import FirmwareImage
 from firmware.loader import FirmwareLoader
 
 import urlparse
-
+import json
+import logging
 
 class NetgearSpider(Spider):
     name = "netgear"
     allowed_domains = ["netgear.com"]
-    # "http://downloadcenter.netgear.com/fr/", "http://downloadcenter.netgear.com/de/", "http://downloadcenter.netgear.com/it/", "http://downloadcenter.netgear.com/ru/", "http://downloadcenter.netgear.com/other/"]
-    start_urls = ["http://downloadcenter.netgear.com"]
-
-    visited = []
-
-    # grab the first argument from e.g.
-    # javascript:__doPostBack('ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$BasicSearchPanel$btnAdvancedSearch','')
-    @staticmethod
-    def strip_js(url):
-        return url.split('\'')[1]
+    start_urls = ["http://netgear.com/system/supportModels.json"]
 
     def parse(self, response):
-        # choose the "Product Drilldown" button
-        if response.xpath(
-                "//a[@id='ctl00_ctl00_ctl00_mainContent_localizedContent_bodyCenter_BasicSearchPanel_btnAdvancedSearch']"):
-            href = NetgearSpider.strip_js(response.xpath(
-                "//a[@id='ctl00_ctl00_ctl00_mainContent_localizedContent_bodyCenter_BasicSearchPanel_btnAdvancedSearch']/@href").extract()[0])
+        products = json.loads(response.body)
 
-            yield FormRequest.from_response(response,
-                                            formname="aspnetForm",
-                                            formdata={"__EVENTTARGET": href},
-                                            headers={"Referer": response.url},
-                                            callback=self.parse)
+        unsupported = 0
+        for product in products[:]:
+            if not ("/support/product/" in product['url'] and "aspx" in product['url']):
+                logging.warning('Unprocessible product URL: ' + product['url'])
+                unsupported += 1
+            else:
+                yield Request(url="http://netgear.com" + product['url'], callback=self.parse_product)
+        logging.warning("Total number of unprocessible products: %d" % unsupported)
 
-        # continue iterating through product/model/os selector
-        else:
-            if response.xpath("//div[@id='LargeFirmware']//a"):
-                mib = None
+    outer_count_map = {}
+    extension_map = {}
 
-                for entry in response.xpath("//div[@id='LargeFirmware']//a"):
-                    href = entry.xpath("./@data-durl").extract()
-                    text = entry.xpath(".//text()").extract()
+    def parse_product(self, response):
+        results = []
 
-                    # sometimes it is 'href' instead of 'data-durl'
-                    if not href:
-                        href = entry.xpath("./@href").extract()
+        outers = response.css('#topicsdownload:not(.hidea)')
+        outer_count = len(outers)
+        if outer_count not in self.outer_count_map:
+            self.outer_count_map[outer_count] = 0
+        self.outer_count_map[outer_count] += 1
 
-                    if "firmware" in " ".join(text).lower():
-                        item = FirmwareLoader(
-                            item=FirmwareImage(), response=response)
-                        item.add_value(
-                            "version", FirmwareLoader.find_version_period(text))
-                        item.add_value("url", href[0])
-                        item.add_value("description", text[0])
-                        item.add_value("mib", mib)
-                        item.add_value("product", response.meta["product"])
-                        item.add_value("vendor", self.name)
-                        yield item.load_item()
+        if outer_count == 0:
+            logging.warning('Cannot find download section on URL: ' + response.request.url)
+            return
+        elif outer_count > 0:
+            logging.warning('Duplicate download sections present on URL: ' + response.request.url + '. Picking the first.')
 
-                    elif "mib" in " ".join(text).lower():
-                        mib = urlparse.urljoin(response.url, href[0].strip())
+        outer = outers[0]
+        items = outer.css('.accordion-item')
 
-            elif "" not in response.xpath("//select[@name='ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProduct']/option/@value").extract():
-                for entry in response.xpath(
-                        "//select[@name='ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProduct']/option"):
-                    rsrc = entry.xpath("./@value").extract()[0]
-                    text = entry.xpath(".//text()").extract()
-                    if text and (response.url, rsrc) not in self.visited:
-                        self.visited.append((response.url, rsrc))
+        if len(items) == 0:
+            logging.warning('No download items found on URL: ' + response.request.url)
+            return
 
-                        yield FormRequest.from_response(response,
-                                                        formname="aspnetForm",
-                                                        formdata={"__EVENTTARGET": "ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProduct",
-                                                                  "ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProduct": rsrc, "__ASYNCPOST:": "true"},
-                                                        meta={
-                                                            "product": text[0]},
-                                                        headers={
-                                                            "Referer": response.url},
-                                                        callback=self.parse)
+        for item in items:
+            name = item.css('.accordion-title h1')[0].xpath("text()").extract()[0].encode('utf-8')
+            link = item.css('.accordion-content a')[0].xpath("@href").extract()[0]
 
-            elif "" not in response.xpath("//select[@name='ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductFamily']/option/@value").extract():
-                for entry in response.xpath(
-                        "//select[@name='ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductFamily']/option"):
-                    rsrc = entry.xpath("./@value").extract()[0]
-                    text = entry.xpath(".//text()").extract()
+            if not ("Firmware" in name or "firmware" in name):
+                logging.warning('Skipping non-firmware download: ' + name)
+                continue
 
-                    if text and (response.url, rsrc) not in self.visited:
-                        self.visited.append((response.url, rsrc))
+            result = FirmwareImage()
+            result['product'] = response.css('.model .product-code').xpath("text()").extract()[0].strip()
+            result['vendor'] = 'Netgear'
 
-                        yield FormRequest.from_response(response,
-                                                        formname="aspnetForm",
-                                                        formdata={"__EVENTTARGET": "ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductFamily",
-                                                                  "ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductFamily": rsrc, "__ASYNCPOST:": "true"},
-                                                        headers={
-                                                            "Referer": response.url},
-                                                        callback=self.parse)
+            result['description'] = name
+            result['url'] = link
 
-            elif "" not in response.xpath("//select[@name='ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductCategory']/option/@value").extract():
-                for entry in response.xpath(
-                        "//select[@name='ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductCategory']/option"):
-                    rsrc = entry.xpath("./@value").extract()[0]
-                    text = entry.xpath(".//text()").extract()
+            results.append(result)
 
-                    if text and (response.url, rsrc) not in self.visited:
-                        self.visited.append((response.url, rsrc))
-
-                        yield FormRequest.from_response(response,
-                                                        formname="aspnetForm",
-                                                        formdata={"__EVENTTARGET": "ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductCategory",
-                                                                  "ctl00$ctl00$ctl00$mainContent$localizedContent$bodyCenter$adsPanel$lbProductCategory": rsrc, "__ASYNCPOST:": "true"},
-                                                        headers={
-                                                            "Referer": response.url},
-                                                        callback=self.parse)
+        return results
